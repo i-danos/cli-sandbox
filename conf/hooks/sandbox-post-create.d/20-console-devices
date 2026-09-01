@@ -1,0 +1,47 @@
+#!/bin/sh
+#
+# Bind the console device nodes a login session can sit on into the sandbox.
+#
+# pam_sandbox switches the session into the sandbox's namespaces and chroots
+# into its root; login(1) then carries on with the terminal it was started on,
+# and refers to it by name. util-linux 2.41 (trixie) needs that node to exist
+# under the new root. 2.33 (buster) did not, which is why this hook has no
+# counterpart upstream and why the container's /dev -- which systemd-nspawn
+# builds from a fixed minimal list, unchanged since then -- still does not
+# carry one.
+#
+# Without it the shell exits the instant login hands over. The session opens
+# and pam_sandbox reports "entering sandbox" both times, so nothing upstream of
+# here looks wrong; what you see is getty respawning every few seconds and a
+# console that echoes but answers nothing.
+#
+# pts devices need no help: /dev/pts is already in the container, which is why
+# ssh sessions were never affected and only the console was.
+#
+# The list comes from the getty units systemd actually has, so only terminals
+# that can host a login are bound, and a machine with no serial console binds
+# nothing extra.
+
+set -e
+
+[ -n "${CLI_SANDBOX_NSPAWN_TEMPLATE:-}" ] || exit 0
+
+ttys=$(systemctl list-units --no-legend --no-pager --all \
+		'getty@*.service' 'serial-getty@*.service' 2>/dev/null |
+	sed -n 's/^[[:space:]]*\(serial-\)\{0,1\}getty@\([^.]*\)\.service.*/\2/p' |
+	sort -u)
+
+binds=""
+for t in $ttys; do
+	[ -c "/dev/$t" ] || continue
+	binds="$binds
+Bind=/dev/$t"
+done
+
+[ -n "$binds" ] || exit 0
+
+cat >> "$CLI_SANDBOX_NSPAWN_TEMPLATE" <<EOF
+
+# Added by $0
+[Files]$binds
+EOF
